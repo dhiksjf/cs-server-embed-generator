@@ -1,0 +1,26 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: '*/14 * * * *' # Every 14 minutes
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install requests
+        run: pip install requests
+        
+      - name: Run Keep Alive Script
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: python cs-server-embed-generator/backend/keep_alive.py
