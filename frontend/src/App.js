@@ -5,7 +5,7 @@ import HomePage from "@/pages/HomePage";
 import SettingsPage from "@/pages/SettingsPage";
 import PreviewPage from "@/pages/PreviewPage";
 import SecretDownloadPage from "@/pages/SecretDownloadPage";
-import { Toaster } from "@/components/ui/sonner";
+import { Toaster } from "sonner";
 
 function App() {
   return (
