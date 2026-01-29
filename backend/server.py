@@ -1,22 +1,21 @@
-from fastapi import FastAPI, APIRouter, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, APIRouter, HTTPException, Query
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, validator
 from typing import List, Optional, Dict, Any
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import a2s
 import asyncio
 import socket
 import time
-import zipfile
-import io
-import shutil
+import json
+import hashlib
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -27,7 +26,11 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 # Create the main app without a prefix
-app = FastAPI()
+app = FastAPI(
+    title="CS Server Widget Generator API",
+    description="Professional Counter-Strike Server Monitoring API",
+    version="2.0.0"
+)
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
@@ -37,6 +40,13 @@ api_router = APIRouter(prefix="/api")
 class ServerQueryRequest(BaseModel):
     ip: str
     port: int
+    timeout: Optional[float] = 3.0
+    
+    @validator('port')
+    def validate_port(cls, v):
+        if not 1 <= v <= 65535:
+            raise ValueError('Port must be between 1 and 65535')
+        return v
 
 class ServerInfo(BaseModel):
     hostname: str
@@ -49,6 +59,11 @@ class ServerInfo(BaseModel):
     password_protected: bool
     vac_enabled: bool
     ping: Optional[float] = None
+
+class PlayerInfo(BaseModel):
+    name: str
+    score: int
+    duration: float
 
 class WidgetConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -67,12 +82,12 @@ class WidgetConfig(BaseModel):
         "password_protected": True,
         "vac_enabled": True
     })
-    theme: str = "neon"  # neon, classic, minimal, terminal, retro, glassmorphism, military, cyberpunk
+    theme: str = "neon"
     accent_color: str = "#00ff88"
     background_color: str = "#0f0f14"
     text_color: str = "#e0e0e0"
     font_family: str = "'Space Grotesk', sans-serif"
-    refresh_interval: int = 30  # seconds
+    refresh_interval: int = 30
     dark_mode: bool = True
     border_radius: int = 16
     border_style: str = "solid"
@@ -80,6 +95,14 @@ class WidgetConfig(BaseModel):
     animation_speed: str = "normal"
     layout: str = "default"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_accessed: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    access_count: int = 0
+    
+    @validator('refresh_interval')
+    def validate_refresh_interval(cls, v):
+        if not 5 <= v <= 300:
+            raise ValueError('Refresh interval must be between 5 and 300 seconds')
+        return v
 
 class WidgetConfigCreate(BaseModel):
     server_ip: str
@@ -98,10 +121,45 @@ class WidgetConfigCreate(BaseModel):
     animation_speed: str = "normal"
     layout: str = "default"
 
+class WidgetStats(BaseModel):
+    total_widgets: int
+    total_queries: int
+    active_servers: int
+    popular_themes: Dict[str, int]
+
+
+# Cache for server queries
+query_cache = {}
+CACHE_DURATION = 10  # seconds
+
+def get_cache_key(ip: str, port: int) -> str:
+    """Generate cache key for server query"""
+    return f"{ip}:{port}"
+
+def get_cached_query(ip: str, port: int) -> Optional[Dict]:
+    """Get cached server query result if valid"""
+    key = get_cache_key(ip, port)
+    if key in query_cache:
+        cached_data, timestamp = query_cache[key]
+        if time.time() - timestamp < CACHE_DURATION:
+            return cached_data
+    return None
+
+def set_cached_query(ip: str, port: int, data: Dict):
+    """Cache server query result"""
+    key = get_cache_key(ip, port)
+    query_cache[key] = (data, time.time())
+
 
 # Helper function to query CS 1.6 server
 def query_cs_server(ip: str, port: int, timeout: float = 3.0) -> Dict[str, Any]:
-    """Query a CS 1.6 server using the Source/GoldSrc protocol"""
+    """Query a CS 1.6 server using the Source/GoldSrc protocol with caching"""
+    
+    # Check cache first
+    cached_result = get_cached_query(ip, port)
+    if cached_result:
+        return cached_result
+    
     try:
         address = (ip, port)
         
@@ -111,16 +169,17 @@ def query_cs_server(ip: str, port: int, timeout: float = 3.0) -> Dict[str, Any]:
         ping = (time.time() - start_time) * 1000
         
         # Try to get player list
+        player_list = []
         try:
             players = a2s.players(address, timeout=timeout)
             player_list = [
-                {"name": p.name, "score": p.score, "duration": p.duration}
+                {"name": p.name, "score": p.score, "duration": round(p.duration, 2)}
                 for p in players if p.name
             ]
-        except Exception:
-            player_list = []
+        except Exception as e:
+            logger.warning(f"Failed to fetch players for {ip}:{port} - {str(e)}")
         
-        return {
+        result = {
             "success": True,
             "data": {
                 "hostname": info.server_name,
@@ -136,19 +195,49 @@ def query_cs_server(ip: str, port: int, timeout: float = 3.0) -> Dict[str, Any]:
                 "player_list": player_list
             }
         }
+        
+        # Cache the result
+        set_cached_query(ip, port, result)
+        return result
+        
     except socket.timeout:
         return {"success": False, "error": "Connection timeout - server may be offline"}
     except ConnectionRefusedError:
         return {"success": False, "error": "Connection refused - invalid IP or port"}
     except Exception as e:
+        logger.error(f"Error querying server {ip}:{port} - {str(e)}")
         return {"success": False, "error": f"Failed to query server: {str(e)}"}
 
 
 # API Routes
+@api_router.get("/")
+async def root():
+    """API root endpoint with information"""
+    return {
+        "name": "CS Server Widget Generator API",
+        "version": "2.0.0",
+        "endpoints": {
+            "query_server": "/api/query-server",
+            "save_config": "/api/save-config",
+            "get_config": "/api/widget/{widget_id}/config",
+            "get_status": "/api/widget/{widget_id}/status",
+            "get_widget": "/api/widget/{widget_id}",
+            "list_widgets": "/api/widgets",
+            "delete_widget": "/api/widget/{widget_id}",
+            "stats": "/api/stats"
+        }
+    }
+
+
 @api_router.post("/query-server")
 async def query_server(request: ServerQueryRequest):
     """Query a CS 1.6 server and return its information"""
-    result = await asyncio.to_thread(query_cs_server, request.ip, request.port)
+    result = await asyncio.to_thread(
+        query_cs_server, 
+        request.ip, 
+        request.port, 
+        request.timeout
+    )
     
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -164,8 +253,11 @@ async def save_config(config: WidgetConfigCreate):
     # Convert to dict and serialize datetime
     doc = config_obj.model_dump()
     doc['created_at'] = doc['created_at'].isoformat()
+    doc['last_accessed'] = doc['last_accessed'].isoformat()
     
     await db.widget_configs.insert_one(doc)
+    
+    logger.info(f"Created widget {config_obj.widget_id} for {config.server_ip}:{config.server_port}")
     return config_obj
 
 
@@ -180,6 +272,8 @@ async def get_config(widget_id: str):
     # Convert ISO string timestamp back to datetime
     if isinstance(config['created_at'], str):
         config['created_at'] = datetime.fromisoformat(config['created_at'])
+    if isinstance(config.get('last_accessed'), str):
+        config['last_accessed'] = datetime.fromisoformat(config['last_accessed'])
     
     return config
 
@@ -191,6 +285,15 @@ async def get_server_status(widget_id: str):
     
     if not config:
         raise HTTPException(status_code=404, detail="Configuration not found")
+    
+    # Update access stats
+    await db.widget_configs.update_one(
+        {"widget_id": widget_id},
+        {
+            "$set": {"last_accessed": datetime.now(timezone.utc).isoformat()},
+            "$inc": {"access_count": 1}
+        }
+    )
     
     result = await asyncio.to_thread(
         query_cs_server, 
@@ -226,13 +329,99 @@ async def get_server_status(widget_id: str):
     }
 
 
+@api_router.get("/widgets")
+async def list_widgets(
+    limit: int = Query(default=50, le=100),
+    skip: int = Query(default=0, ge=0),
+    sort_by: str = Query(default="created_at", regex="^(created_at|last_accessed|access_count)$")
+):
+    """List all widgets with pagination"""
+    cursor = db.widget_configs.find({}, {"_id": 0})
+    
+    # Apply sorting
+    sort_order = -1  # Descending
+    cursor = cursor.sort(sort_by, sort_order)
+    
+    # Apply pagination
+    cursor = cursor.skip(skip).limit(limit)
+    
+    widgets = await cursor.to_list(length=limit)
+    total = await db.widget_configs.count_documents({})
+    
+    return {
+        "total": total,
+        "limit": limit,
+        "skip": skip,
+        "widgets": widgets
+    }
+
+
+@api_router.delete("/widget/{widget_id}")
+async def delete_widget(widget_id: str):
+    """Delete a widget configuration"""
+    result = await db.widget_configs.delete_one({"widget_id": widget_id})
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Widget not found")
+    
+    logger.info(f"Deleted widget {widget_id}")
+    return {"message": "Widget deleted successfully"}
+
+
+@api_router.get("/stats")
+async def get_stats():
+    """Get platform statistics"""
+    total_widgets = await db.widget_configs.count_documents({})
+    
+    # Get total access count
+    pipeline = [
+        {"$group": {"_id": None, "total_queries": {"$sum": "$access_count"}}}
+    ]
+    result = await db.widget_configs.aggregate(pipeline).to_list(1)
+    total_queries = result[0]["total_queries"] if result else 0
+    
+    # Get theme popularity
+    theme_pipeline = [
+        {"$group": {"_id": "$theme", "count": {"$sum": 1}}}
+    ]
+    theme_results = await db.widget_configs.aggregate(theme_pipeline).to_list(None)
+    popular_themes = {item["_id"]: item["count"] for item in theme_results}
+    
+    # Count unique servers
+    unique_servers_pipeline = [
+        {"$group": {"_id": {"ip": "$server_ip", "port": "$server_port"}}}
+    ]
+    unique_servers = await db.widget_configs.aggregate(unique_servers_pipeline).to_list(None)
+    active_servers = len(unique_servers)
+    
+    return {
+        "total_widgets": total_widgets,
+        "total_queries": total_queries,
+        "active_servers": active_servers,
+        "popular_themes": popular_themes,
+        "cache_size": len(query_cache)
+    }
+
+
 @api_router.get("/widget/{widget_id}", response_class=HTMLResponse)
 async def serve_widget(widget_id: str):
-    """Serve the live widget HTML for iframe embedding - Mobile-First Design"""
+    """Serve the live widget HTML for iframe embedding - Enhanced Mobile-First Design"""
     config = await db.widget_configs.find_one({"widget_id": widget_id}, {"_id": 0})
     
     if not config:
-        return HTMLResponse("<div style='color:red;padding:20px;'>Widget configuration not found</div>", status_code=404)
+        return HTMLResponse(
+            "<div style='color:red;padding:20px;text-align:center;'>Widget configuration not found</div>", 
+            status_code=404
+        )
+    
+    # Update access stats
+    await db.widget_configs.update_one(
+        {"widget_id": widget_id},
+        {
+            "$set": {"last_accessed": datetime.now(timezone.utc).isoformat()},
+            "$inc": {"access_count": 1}
+        }
+    )
     
     # Get the backend URL from environment
     backend_url = os.environ.get('BACKEND_URL', 'http://localhost:8001')
@@ -243,10 +432,10 @@ async def serve_widget(widget_id: str):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>CS Server Status</title>
+    <title>CS Server Status - {config['server_ip']}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=Orbitron:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
         * {{ 
             margin: 0; 
@@ -288,6 +477,12 @@ async def serve_widget(widget_id: str):
             flex-direction: column;
             overflow: hidden;
             position: relative;
+            animation: fadeIn 0.5s ease-out;
+        }}
+        
+        @keyframes fadeIn {{
+            from {{ opacity: 0; transform: scale(0.95); }}
+            to {{ opacity: 1; transform: scale(1); }}
         }}
         
         .widget-header {{
@@ -324,6 +519,12 @@ async def serve_widget(widget_id: str):
             font-size: clamp(10px, 2.5vw, 12px);
             font-weight: 700;
             margin-top: 8px;
+            animation: pulse 2s ease-in-out infinite;
+        }}
+        
+        .status-badge.offline {{
+            background: #ef4444;
+            animation: none;
         }}
         
         .status-indicator {{
@@ -331,7 +532,6 @@ async def serve_widget(widget_id: str):
             height: 6px;
             background: #000;
             border-radius: 50%;
-            animation: pulse 2s ease-in-out infinite;
         }}
         
         @keyframes pulse {{
@@ -410,6 +610,12 @@ async def serve_widget(widget_id: str):
             border-radius: 6px;
             margin-bottom: 6px;
             font-size: clamp(10px, 2.5vw, 12px);
+            animation: slideIn 0.3s ease-out;
+        }}
+        
+        @keyframes slideIn {{
+            from {{ opacity: 0; transform: translateX(-10px); }}
+            to {{ opacity: 1; transform: translateX(0); }}
         }}
         
         .error {{
@@ -428,6 +634,20 @@ async def serve_widget(widget_id: str):
             opacity: 0.7;
         }}
         
+        .spinner {{
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: {config['accent_color']};
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }}
+        
+        @keyframes spin {{
+            to {{ transform: rotate(360deg); }}
+        }}
+        
         .footer {{
             margin-top: clamp(8px, 2vw, 12px);
             padding-top: clamp(8px, 2vw, 12px);
@@ -438,7 +658,6 @@ async def serve_widget(widget_id: str):
             flex-shrink: 0;
         }}
         
-        /* Tablet styles */
         @media (min-width: 768px) {{
             .widget-container {{
                 max-width: 500px;
@@ -449,7 +668,6 @@ async def serve_widget(widget_id: str):
             }}
         }}
         
-        /* Desktop styles */
         @media (min-width: 1024px) {{
             .widget-container {{
                 max-width: 600px;
@@ -458,21 +676,33 @@ async def serve_widget(widget_id: str):
     </style>
 </head>
 <body>
-    <div id="widget" class="loading">Loading server data...</div>
+    <div id="widget" class="loading">
+        <div class="spinner"></div>
+    </div>
 
     <script>
         const WIDGET_ID = '{widget_id}';
         const API_URL = '{backend_url}/api/widget/' + WIDGET_ID + '/status';
         const REFRESH_INTERVAL = {config['refresh_interval']} * 1000;
+        let fetchAttempts = 0;
+        const MAX_RETRIES = 3;
 
         async function fetchServerData() {{
             try {{
                 const response = await fetch(API_URL);
                 const result = await response.json();
+                fetchAttempts = 0;  // Reset on success
                 
                 if (!result.success) {{
                     document.getElementById('widget').innerHTML = `
                         <div class="widget-container">
+                            <div class="widget-header">
+                                <div class="server-name">{config['server_ip']}:{config['server_port']}</div>
+                                <div class="status-badge offline">
+                                    <div class="status-indicator"></div>
+                                    OFFLINE
+                                </div>
+                            </div>
                             <div class="error">⚠️ Server offline or unreachable</div>
                         </div>
                     `;
@@ -488,7 +718,7 @@ async def serve_widget(widget_id: str):
                 if (data.hostname) {{
                     html += `
                         <div class="widget-header">
-                            <div class="server-name">${{data.hostname}}</div>
+                            <div class="server-name">${{escapeHtml(data.hostname)}}</div>
                             <div class="server-address">{config['server_ip']}:{config['server_port']}</div>
                             <div class="status-badge">
                                 <div class="status-indicator"></div>
@@ -504,7 +734,7 @@ async def serve_widget(widget_id: str):
                     html += `
                         <div class="info-item">
                             <span class="info-label">🗺️ Map</span>
-                            <span class="info-value">${{data.map}}</span>
+                            <span class="info-value">${{escapeHtml(data.map)}}</span>
                         </div>
                     `;
                 }}
@@ -522,16 +752,17 @@ async def serve_widget(widget_id: str):
                     html += `
                         <div class="info-item">
                             <span class="info-label">🎮 Game</span>
-                            <span class="info-value">${{data.game}}</span>
+                            <span class="info-value">${{escapeHtml(data.game)}}</span>
                         </div>
                     `;
                 }}
                 
                 if (data.ping !== undefined) {{
+                    const pingColor = data.ping < 50 ? '#00ff88' : data.ping < 100 ? '#ffd700' : '#ff6b6b';
                     html += `
                         <div class="info-item">
                             <span class="info-label">📡 Ping</span>
-                            <span class="info-value">${{data.ping}}ms</span>
+                            <span class="info-value" style="color: ${{pingColor}}">${{data.ping}}ms</span>
                         </div>
                     `;
                 }}
@@ -559,14 +790,14 @@ async def serve_widget(widget_id: str):
                 if (data.player_list && data.player_list.length > 0) {{
                     html += `
                         <div style="margin-top: clamp(12px, 3vw, 16px);">
-                            <div class="info-label" style="margin-bottom: 8px;">Active Players ($ {{data.player_list.length}})</div>
+                            <div class="info-label" style="margin-bottom: 8px;">Active Players (${{data.player_list.length}})</div>
                             <div class="player-list">
                     `;
-                    data.player_list.forEach(player => {{
+                    data.player_list.forEach((player, index) => {{
                         const duration = Math.floor(player.duration / 60);
                         html += `
-                            <div class="player">
-                                ${{player.name}} - Score: ${{player.score}} - Time: ${{duration}}m
+                            <div class="player" style="animation-delay: ${{index * 0.05}}s">
+                                ${{escapeHtml(player.name)}} - Score: ${{player.score}} - Time: ${{duration}}m
                             </div>
                         `;
                     }});
@@ -575,18 +806,36 @@ async def serve_widget(widget_id: str):
                 
                 html += `
                     <div class="footer">
-                        ⚡ Auto-refresh: ${{{config['refresh_interval']}}}s
+                        ⚡ Auto-refresh: {config['refresh_interval']}s | Widget ID: ${{WIDGET_ID.substring(0, 8)}}...
                     </div>
                 </div>`;
                 
                 document.getElementById('widget').innerHTML = html;
             }} catch (error) {{
-                document.getElementById('widget').innerHTML = `
-                    <div class="widget-container">
-                        <div class="error">Failed to load server data</div>
-                    </div>
-                `;
+                fetchAttempts++;
+                console.error('Fetch error:', error);
+                
+                if (fetchAttempts >= MAX_RETRIES) {{
+                    document.getElementById('widget').innerHTML = `
+                        <div class="widget-container">
+                            <div class="error">Failed to load server data after ${{MAX_RETRIES}} attempts</div>
+                        </div>
+                    `;
+                }} else {{
+                    // Show loading spinner
+                    document.getElementById('widget').innerHTML = `
+                        <div class="loading">
+                            <div class="spinner"></div>
+                        </div>
+                    `;
+                }}
             }}
+        }}
+        
+        function escapeHtml(text) {{
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }}
 
         // Initial fetch
@@ -620,6 +869,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+@app.on_event("startup")
+async def startup_db_client():
+    logger.info("Starting up - MongoDB connected")
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+    logger.info("Shutting down - MongoDB disconnected")
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cache_size": len(query_cache)
+    }
