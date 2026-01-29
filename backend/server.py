@@ -53,7 +53,7 @@ class ServerInfo(BaseModel):
 class WidgetConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
     
-    config_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    widget_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     server_ip: str
     server_port: int
     enabled_fields: Dict[str, bool] = Field(default_factory=lambda: {
@@ -169,10 +169,10 @@ async def save_config(config: WidgetConfigCreate):
     return config_obj
 
 
-@api_router.get("/config/{config_id}")
-async def get_config(config_id: str):
+@api_router.get("/widget/{widget_id}/config")
+async def get_config(widget_id: str):
     """Retrieve a saved widget configuration"""
-    config = await db.widget_configs.find_one({"config_id": config_id}, {"_id": 0})
+    config = await db.widget_configs.find_one({"widget_id": widget_id}, {"_id": 0})
     
     if not config:
         raise HTTPException(status_code=404, detail="Configuration not found")
@@ -184,10 +184,10 @@ async def get_config(config_id: str):
     return config
 
 
-@api_router.get("/server-status/{config_id}")
-async def get_server_status(config_id: str):
+@api_router.get("/widget/{widget_id}/status")
+async def get_server_status(widget_id: str):
     """Get real-time server status for a saved configuration"""
-    config = await db.widget_configs.find_one({"config_id": config_id}, {"_id": 0})
+    config = await db.widget_configs.find_one({"widget_id": widget_id}, {"_id": 0})
     
     if not config:
         raise HTTPException(status_code=404, detail="Configuration not found")
@@ -213,17 +213,23 @@ async def get_server_status(config_id: str):
         "config": {
             "theme": config["theme"],
             "accent_color": config["accent_color"],
+            "background_color": config["background_color"],
+            "text_color": config["text_color"],
             "font_family": config["font_family"],
             "dark_mode": config["dark_mode"],
+            "border_radius": config["border_radius"],
+            "border_style": config["border_style"],
+            "shadow_intensity": config["shadow_intensity"],
+            "animation_speed": config["animation_speed"],
             "refresh_interval": config["refresh_interval"]
         }
     }
 
 
-@api_router.get("/widget/{config_id}", response_class=HTMLResponse)
-async def serve_widget(config_id: str):
-    """Serve the live widget HTML for iframe embedding"""
-    config = await db.widget_configs.find_one({"config_id": config_id}, {"_id": 0})
+@api_router.get("/widget/{widget_id}", response_class=HTMLResponse)
+async def serve_widget(widget_id: str):
+    """Serve the live widget HTML for iframe embedding - Mobile-First Design"""
+    config = await db.widget_configs.find_one({"widget_id": widget_id}, {"_id": 0})
     
     if not config:
         return HTMLResponse("<div style='color:red;padding:20px;'>Widget configuration not found</div>", status_code=404)
@@ -236,118 +242,265 @@ async def serve_widget(config_id: str):
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>CS Server Status</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        * {{ 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }}
+        
+        html, body {{
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            position: fixed;
+            -webkit-overflow-scrolling: touch;
+        }}
+        
         body {{
             font-family: {config['font_family']};
             background: transparent;
             color: {'#e0e0e0' if config['dark_mode'] else '#1a1a1a'};
-            padding: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
         }}
+        
         .widget-container {{
-            background: {'rgba(15, 15, 20, 0.95)' if config['dark_mode'] else 'rgba(255, 255, 255, 0.95)'};
-            border-radius: 16px;
-            padding: 20px;
-            border: 1px solid {'rgba(0, 255, 136, 0.3)' if config['dark_mode'] else 'rgba(0, 0, 0, 0.1)'};
-            backdrop-filter: blur(12px);
-            box-shadow: 0 8px 32px {'rgba(0, 255, 136, 0.1)' if config['dark_mode'] else 'rgba(0, 0, 0, 0.1)'};
-            max-width: 600px;
+            width: 100%;
+            height: 100%;
+            max-width: 100%;
+            max-height: 100%;
+            background: {config['background_color']};
+            color: {config['text_color']};
+            border-radius: {config['border_radius']}px;
+            border: 2px {config['border_style']} {config['accent_color']};
+            box-shadow: 0 0 {20 + config['shadow_intensity']//5}px {config['accent_color']}40;
+            padding: clamp(12px, 3vw, 20px);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
         }}
-        .server-title {{
-            font-size: 18px;
-            font-weight: 600;
-            margin-bottom: 16px;
+        
+        .widget-header {{
+            margin-bottom: clamp(12px, 3vw, 16px);
+            padding-bottom: clamp(8px, 2vw, 12px);
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            flex-shrink: 0;
+        }}
+        
+        .server-name {{
+            font-size: clamp(14px, 4vw, 18px);
+            font-weight: 700;
             color: {config['accent_color']};
+            margin-bottom: 4px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            line-height: 1.3;
         }}
+        
+        .server-address {{
+            font-size: clamp(10px, 2.5vw, 12px);
+            opacity: 0.5;
+            font-family: 'JetBrains Mono', monospace;
+        }}
+        
+        .status-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: clamp(4px, 1vw, 6px) clamp(8px, 2vw, 12px);
+            background: {config['accent_color']};
+            color: #000;
+            border-radius: 8px;
+            font-size: clamp(10px, 2.5vw, 12px);
+            font-weight: 700;
+            margin-top: 8px;
+        }}
+        
+        .status-indicator {{
+            width: 6px;
+            height: 6px;
+            background: #000;
+            border-radius: 50%;
+            animation: pulse 2s ease-in-out infinite;
+        }}
+        
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; transform: scale(1); }}
+            50% {{ opacity: 0.7; transform: scale(0.9); }}
+        }}
+        
         .info-grid {{
             display: grid;
-            gap: 12px;
+            gap: clamp(8px, 2vw, 12px);
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: thin;
+            scrollbar-color: {config['accent_color']}40 transparent;
         }}
+        
+        .info-grid::-webkit-scrollbar {{
+            width: 4px;
+        }}
+        
+        .info-grid::-webkit-scrollbar-track {{
+            background: transparent;
+        }}
+        
+        .info-grid::-webkit-scrollbar-thumb {{
+            background: {config['accent_color']}40;
+            border-radius: 2px;
+        }}
+        
         .info-item {{
             display: flex;
             justify-content: space-between;
-            padding: 10px;
-            background: {'rgba(255, 255, 255, 0.05)' if config['dark_mode'] else 'rgba(0, 0, 0, 0.03)'};
-            border-radius: 8px;
-            border-left: 3px solid {config['accent_color']};
+            align-items: center;
+            padding: clamp(8px, 2vw, 12px);
+            background: rgba(0,0,0,0.3);
+            border-radius: clamp(6px, 1.5vw, 10px);
+            font-size: clamp(11px, 2.8vw, 14px);
+            transition: all 0.3s ease;
+            min-height: 40px;
         }}
+        
+        .info-item:hover {{
+            background: rgba(0,0,0,0.4);
+            transform: translateX(2px);
+        }}
+        
         .info-label {{
-            font-weight: 500;
             opacity: 0.7;
-            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: clamp(4px, 1vw, 8px);
+            flex-shrink: 0;
         }}
+        
         .info-value {{
             font-weight: 600;
-            font-size: 14px;
+            text-align: right;
+            word-break: break-word;
+            overflow-wrap: break-word;
+            max-width: 60%;
         }}
+        
         .player-list {{
+            width: 100%;
             margin-top: 8px;
-            font-size: 13px;
+            max-height: 200px;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
         }}
+        
         .player {{
-            padding: 6px;
-            background: {'rgba(255, 255, 255, 0.03)' if config['dark_mode'] else 'rgba(0, 0, 0, 0.02)'};
-            border-radius: 4px;
-            margin-top: 4px;
+            padding: clamp(6px, 1.5vw, 8px);
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+            margin-bottom: 6px;
+            font-size: clamp(10px, 2.5vw, 12px);
         }}
-        .status-badge {{
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-size: 12px;
-            font-weight: 600;
-            background: {config['accent_color']};
-            color: #000;
-        }}
+        
         .error {{
-            color: #ff4444;
-            padding: 12px;
+            padding: clamp(16px, 4vw, 24px);
             text-align: center;
-            font-weight: 500;
+            color: #ef4444;
+            font-size: clamp(12px, 3vw, 14px);
         }}
+        
         .loading {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: clamp(20px, 5vw, 40px);
+            font-size: clamp(12px, 3vw, 14px);
+            opacity: 0.7;
+        }}
+        
+        .footer {{
+            margin-top: clamp(8px, 2vw, 12px);
+            padding-top: clamp(8px, 2vw, 12px);
+            border-top: 1px solid rgba(255,255,255,0.05);
             text-align: center;
-            padding: 20px;
-            opacity: 0.6;
+            font-size: clamp(8px, 2vw, 10px);
+            opacity: 0.3;
+            flex-shrink: 0;
+        }}
+        
+        /* Tablet styles */
+        @media (min-width: 768px) {{
+            .widget-container {{
+                max-width: 500px;
+            }}
+            
+            .info-grid {{
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            }}
+        }}
+        
+        /* Desktop styles */
+        @media (min-width: 1024px) {{
+            .widget-container {{
+                max-width: 600px;
+            }}
         }}
     </style>
 </head>
 <body>
-    <div class="widget-container" id="widget">
-        <div class="loading">Loading server data...</div>
-    </div>
+    <div id="widget" class="loading">Loading server data...</div>
+
     <script>
-        const API_URL = '{backend_url}/api';
-        const CONFIG_ID = '{config_id}';
+        const WIDGET_ID = '{widget_id}';
+        const API_URL = '{backend_url}/api/widget/' + WIDGET_ID + '/status';
         const REFRESH_INTERVAL = {config['refresh_interval']} * 1000;
 
         async function fetchServerData() {{
             try {{
-                const response = await fetch(`${{API_URL}}/server-status/${{CONFIG_ID}}`);
+                const response = await fetch(API_URL);
                 const result = await response.json();
                 
                 if (!result.success) {{
                     document.getElementById('widget').innerHTML = `
-                        <div class="error">❌ ${{result.error || 'Server offline'}}</div>
+                        <div class="widget-container">
+                            <div class="error">⚠️ Server offline or unreachable</div>
+                        </div>
                     `;
                     return;
                 }}
                 
                 const data = result.data;
-                let html = '';
+                const cfg = result.config;
                 
+                let html = '<div class="widget-container">';
+                
+                // Header
                 if (data.hostname) {{
-                    html += `<div class="server-title">${{data.hostname}}</div>`;
+                    html += `
+                        <div class="widget-header">
+                            <div class="server-name">${{data.hostname}}</div>
+                            <div class="server-address">{config['server_ip']}:{config['server_port']}</div>
+                            <div class="status-badge">
+                                <div class="status-indicator"></div>
+                                ONLINE
+                            </div>
+                        </div>
+                    `;
                 }}
                 
                 html += '<div class="info-grid">';
                 
-                if (data.map) {{
+                if (data.map !== undefined) {{
                     html += `
                         <div class="info-item">
                             <span class="info-label">🗺️ Map</span>
@@ -357,23 +510,15 @@ async def serve_widget(config_id: str):
                 }}
                 
                 if (data.current_players !== undefined) {{
-                    const maxPlayers = data.max_players !== undefined ? `/${{data.max_players}}` : '';
                     html += `
                         <div class="info-item">
                             <span class="info-label">👥 Players</span>
-                            <span class="info-value">${{data.current_players}}${{maxPlayers}}</span>
-                        </div>
-                    `;
-                }} else if (data.max_players !== undefined) {{
-                    html += `
-                        <div class="info-item">
-                            <span class="info-label">Max Players</span>
-                            <span class="info-value">${{data.max_players}}</span>
+                            <span class="info-value">${{data.current_players}}/${{data.max_players}}</span>
                         </div>
                     `;
                 }}
                 
-                if (data.game) {{
+                if (data.game !== undefined) {{
                     html += `
                         <div class="info-item">
                             <span class="info-label">🎮 Game</span>
@@ -409,10 +554,12 @@ async def serve_widget(config_id: str):
                     `;
                 }}
                 
+                html += '</div>';
+                
                 if (data.player_list && data.player_list.length > 0) {{
                     html += `
-                        <div class="info-item" style="flex-direction: column; align-items: flex-start;">
-                            <span class="info-label">Active Players</span>
+                        <div style="margin-top: clamp(12px, 3vw, 16px);">
+                            <div class="info-label" style="margin-bottom: 8px;">Active Players ($ {{data.player_list.length}})</div>
                             <div class="player-list">
                     `;
                     data.player_list.forEach(player => {{
@@ -426,12 +573,18 @@ async def serve_widget(config_id: str):
                     html += '</div></div>';
                 }}
                 
-                html += '</div>';
+                html += `
+                    <div class="footer">
+                        ⚡ Auto-refresh: ${{{config['refresh_interval']}}}s
+                    </div>
+                </div>`;
                 
                 document.getElementById('widget').innerHTML = html;
             }} catch (error) {{
                 document.getElementById('widget').innerHTML = `
-                    <div class="error">Failed to load server data</div>
+                    <div class="widget-container">
+                        <div class="error">Failed to load server data</div>
+                    </div>
                 `;
             }}
         }}
@@ -447,177 +600,6 @@ async def serve_widget(config_id: str):
     """
     
     return HTMLResponse(content=html)
-
-
-@api_router.get("/download-project")
-async def download_project():
-    """Create and download a ZIP file of the project"""
-    try:
-        # Create a BytesIO object to store the zip file in memory
-        zip_buffer = io.BytesIO()
-        
-        # Create a ZIP file
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Define the project root
-            project_root = Path('/app')
-            
-            # Files to include
-            files_to_include = [
-                'backend/server.py',
-                'backend/requirements.txt',
-                'backend/.env.example',
-                'frontend/src/App.js',
-                'frontend/src/App.css',
-                'frontend/src/index.js',
-                'frontend/src/pages/HomePage.js',
-                'frontend/src/pages/SettingsPage.js',
-                'frontend/src/pages/PreviewPage.js',
-                'frontend/src/pages/SecretDownloadPage.js',
-                'frontend/src/components/WidgetPreview.js',
-                'frontend/package.json',
-                'frontend/tailwind.config.js',
-                'frontend/postcss.config.js',
-                'frontend/.env.example'
-            ]
-            
-            # Add files to ZIP
-            for file_path in files_to_include:
-                full_path = project_root / file_path
-                if full_path.exists():
-                    # Add file to zip with its relative path
-                    zip_file.write(full_path, f'cs-server-embed-generator/{file_path}')
-            
-            # Create README.md
-            readme_content = """# CS Server Embed Generator
-
-A full-stack application for generating customizable, real-time HTML embed widgets for Counter-Strike 1.6 servers.
-
-## Features
-
-- 🎮 Query CS 1.6 servers using Source/GoldSrc protocol
-- 🎨 8+ pre-built themes (Neon, Classic, Minimal, Terminal, Retro, Glassmorphism, Military, Cyberpunk)
-- 🎯 Fully customizable colors, fonts, layouts
-- 📊 Real-time server status updates
-- 🔄 Auto-refresh with configurable intervals
-- 📱 Responsive design (mobile, tablet, desktop)
-- 🔗 Shareable widget configurations
-- 📦 Both iframe and standalone embed options
-
-## Tech Stack
-
-**Backend:**
-- FastAPI (Python)
-- MongoDB with Motor (async driver)
-- python-a2s for CS server queries
-
-**Frontend:**
-- React 19
-- Tailwind CSS
-- Shadcn/UI components
-- Axios for API calls
-
-## Installation
-
-### Backend Setup
-
-```bash
-cd backend
-pip install -r requirements.txt
-
-# Create .env file
-cp .env.example .env
-# Edit .env and configure MongoDB connection
-
-# Run server
-uvicorn server:app --host 0.0.0.0 --port 8001 --reload
-```
-
-### Frontend Setup
-
-```bash
-cd frontend
-yarn install
-
-# Create .env file
-cp .env.example .env
-# Edit .env and set REACT_APP_BACKEND_URL
-
-# Run development server
-yarn start
-```
-
-## API Endpoints
-
-- `POST /api/query-server` - Query a CS 1.6 server
-- `POST /api/save-config` - Save widget configuration
-- `GET /api/config/{id}` - Retrieve configuration
-- `GET /api/server-status/{id}` - Get real-time server data
-- `GET /api/widget/{id}` - Serve widget HTML
-
-## Environment Variables
-
-**Backend (.env):**
-```
-MONGO_URL=mongodb://localhost:27017
-DB_NAME=cs_server_db
-CORS_ORIGINS=*
-BACKEND_URL=http://localhost:8001
-```
-
-**Frontend (.env):**
-```
-REACT_APP_BACKEND_URL=http://localhost:8001
-```
-
-## Usage
-
-1. Enter CS 1.6 server IP and port on the homepage
-2. Click "Fetch Server Info" to query the server
-3. Customize widget appearance on the settings page
-4. Generate embed code and copy it to your website
-
-## License
-
-Open Source - MIT License
-
-## Credits
-
-Built with ❤️ using FastAPI and React
-"""
-            
-            # Add README to ZIP
-            zip_file.writestr('cs-server-embed-generator/README.md', readme_content)
-            
-            # Create .env.example files
-            backend_env_example = """MONGO_URL=mongodb://localhost:27017
-DB_NAME=cs_server_db
-CORS_ORIGINS=*
-BACKEND_URL=http://localhost:8001
-"""
-            zip_file.writestr('cs-server-embed-generator/backend/.env.example', backend_env_example)
-            
-            frontend_env_example = """REACT_APP_BACKEND_URL=http://localhost:8001
-WDS_SOCKET_PORT=443
-REACT_APP_ENABLE_VISUAL_EDITS=false
-ENABLE_HEALTH_CHECK=false
-"""
-            zip_file.writestr('cs-server-embed-generator/frontend/.env.example', frontend_env_example)
-        
-        # Seek to the beginning of the BytesIO object
-        zip_buffer.seek(0)
-        
-        # Return the ZIP file as a streaming response
-        return StreamingResponse(
-            zip_buffer,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": f"attachment; filename=cs-server-embed-generator-{int(time.time())}.zip"
-            }
-        )
-    
-    except Exception as e:
-        logger.error(f"Error creating project download: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to create project download")
 
 
 # Include the router in the main app
